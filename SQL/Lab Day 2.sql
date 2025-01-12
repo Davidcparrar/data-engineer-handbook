@@ -1,19 +1,19 @@
-select * from player_seasons ps;
+SELECT * FROM player_seasons ps;
 
 -- Create Types
-create type season_stats as ( 
+CREATE TYPE season_stats AS ( 
 	season INTEGER,
 	gp INTEGER,
 	pts real,
 	reb real,
 	ast real
-)
+);
 
-create type scoring_class as enum('star', 'good', 'average', 'bad')
+CREATE TYPE scoring_class AS enum('star', 'good', 'average', 'bad');
 
 
 -- Create cumulative table
-create table players (
+CREATE TABLE players (
 	player_name text,
 	height text,
 	college text,
@@ -27,7 +27,18 @@ create table players (
 	current_season INTEGER,
 	is_active BOOLEAN,
 	primary key (player_name, current_season)
-)
+);
+
+-- Create SCD table
+CREATE TABLE players_scd_table
+(
+	player_name text,
+	scoring_class scoring_class,
+	is_active boolean,
+	start_season integer,
+	end_season integer
+	current_season INTEGER
+);
 
 -- Insert data into cumulative table, many rows for same player (many seasons) each with data until that season
 
@@ -105,39 +116,79 @@ JOIN static s
     ON w.player_name = s.player_name;
 
 
--- Create SCD for scoring class
-
+-- Insert SCD for scoring class
+INSERT INTO players_scd_table
 WITH streak_started AS (
-    SELECT player_name,
-           current_season,
-           scoring_class,
-           LAG(scoring_class, 1) OVER
-               (PARTITION BY player_name ORDER BY current_season) <> scoring_class
-               OR LAG(scoring_class, 1) OVER
-               (PARTITION BY player_name ORDER BY current_season) IS NULL
-               AS did_change
-    FROM players
+SELECT player_name,
+       current_season,
+       scoring_class,
+       is_active,
+       LAG(scoring_class, 1) OVER
+           (PARTITION BY player_name ORDER BY current_season) <> scoring_class
+           OR LAG(scoring_class, 1) OVER
+           (PARTITION BY player_name ORDER BY current_season) IS NULL
+           OR LAG(is_active, 1) OVER
+           (PARTITION BY player_name ORDER BY current_season) <> is_active
+           OR LAG(is_active, 1) OVER
+           (PARTITION BY player_name ORDER BY current_season) IS NULL
+           AS did_change
+FROM players
 ),
-     streak_identified AS (
-         SELECT
-            player_name,
-                scoring_class,
-                current_season,
-            SUM(CASE WHEN did_change THEN 1 ELSE 0 END)
-                OVER (PARTITION BY player_name ORDER BY current_season) as streak_identifier
-         FROM streak_started
-     ),
-     aggregated AS (
-         SELECT
-            player_name,
+ streak_identified AS (
+     SELECT
+        player_name,
             scoring_class,
-            streak_identifier,
-            MIN(current_season) AS start_date,
-            MAX(current_season) AS end_date
-         FROM streak_identified
-         GROUP BY 1,2,3
-     )
+            is_active,
+            current_season,
+        SUM(CASE WHEN did_change THEN 1 ELSE 0 END)
+            OVER (PARTITION BY player_name ORDER BY current_season) as streak_identifier
+     FROM streak_started
+ ),
+ aggregated AS (
+     SELECT
+        player_name,
+        scoring_class,
+        is_active,
+        streak_identifier,
+        MIN(current_season) AS start_date,
+        MAX(current_season) AS end_date
+     FROM streak_identified
+     GROUP BY 1,2,3,4
+ )
 
-     SELECT player_name, scoring_class, start_date, end_date
-     FROM aggregated
+SELECT player_name, scoring_class, is_active, 2022, start_date, end_date
+FROM aggregated
 
+-- SCD Year to Year
+
+WITH last_season_scd AS (
+  SELECT * FROM players_scd_table
+  WHERE current_season = 2020
+  AND end_season = 2020
+),
+historical_scd AS (
+  SELECT * FROM players_scd_table
+  WHERE current_season = 2020
+  AND end_season < 2020
+)
+this_season AS (
+  SELECT * FROM players
+  WHERE current_season = 2021
+),
+unchanged_records AS (
+  SELECT ts.player_name, 
+    ls.scoring_class, ls.is_active, ls.start_season, ts.current_season as end_season, ts.current_season
+    FROM this_season ts
+    JOIN last_season_scd ls 
+    ON ts.player_name = ls.player_name
+    WHERE ts.scoring_class = ls.scoring_class 
+    AND ts.is_active = ls.is_active
+  )
+
+
+select ts.player_name, 
+  ls.scoring_class, ts.is_active, 
+  ls.scoring_class, ls.is_active, 
+FROM this_season ts
+  LEFT JOIN last_season_scd ls 
+  ON ts.player_name = ls.player_name
